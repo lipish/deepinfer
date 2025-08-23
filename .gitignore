@@ -1,0 +1,21 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Editors
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+python/worker/.venv/
+
+# Node/Other
+yarn.lock
+package-lock.json
+
+# Misc
+.venv/
+

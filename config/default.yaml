@@ -1,0 +1,16 @@
+server:
+  host: "127.0.0.1"
+  port: 8080
+
+worker:
+  address: "http://127.0.0.1:50051"
+
+model:
+  model_id: "sshleifer/tiny-gpt2"
+  dtype: "fp32"
+  device: "cpu"
+  tokenizer_json: "config/tokenizer.json"
+  adapters: []
+
+max_new_tokens_default: 8
+
