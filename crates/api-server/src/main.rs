@@ -1,23 +1,377 @@
 mod config;
 
-use axum::{extract::State, response::{IntoResponse, Response, sse::{Sse, Event}}, routing::{get, post}, Json, Router};
+use axum::{
+    extract::State,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, convert::Infallible, sync::Arc};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use tokenizers::Tokenizer;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{error, info};
 use worker_proto::engine::v1::{
-    engine_worker_client::EngineWorkerClient,
-    CreateSessionRequest, DecodeRequest, HealthRequest, PrefillRequest,
-    SamplingParams, StartSequenceRequest,
+    engine_worker_client::EngineWorkerClient, BatchDecodeRequest, BatchPrefillRequest,
+    CreateSessionRequest, DecodeRequest, HealthRequest, SamplingParams,
+    StartSequenceRequest, Tokens,
 };
-use tokenizers::Tokenizer;
-use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Clone)]
 struct AppState {
     channel: Channel,
     config: config::Config,
     tokenizer: Arc<Tokenizer>,
+    // shared session for batching across requests
+    session: Arc<Mutex<Option<String>>>,
+    // batchers
+    decode_batcher: DecodeBatcher,
+    prefill_batcher: PrefillBatcher,
+}
+
+impl AppState {
+    async fn ensure_session(&self) -> String {
+        if let Some(s) = self.session.lock().await.as_ref().cloned() {
+            return s;
+        }
+        let mut client = EngineWorkerClient::new(self.channel.clone());
+        let m = &self.config.model;
+        let cs = client
+            .create_session(CreateSessionRequest {
+                model_id: m.model_id.clone(),
+                dtype: m.dtype.clone(),
+                device: m.device.clone(),
+                adapters: m.adapters.clone(),
+            })
+            .await
+            .expect("create_session failed")
+            .into_inner();
+        assert!(cs.ok, "worker returned error: {}", cs.error);
+        let sid = cs.session_id;
+        *self.session.lock().await = Some(sid.clone());
+        sid
+    }
+}
+
+#[derive(Clone)]
+struct DecodeBatcher {
+    tx: mpsc::Sender<DecodeJob>,
+}
+
+struct DecodeJob {
+    seq_id: String,
+    token: u32,
+    pos: u32,
+    sample_in_worker: bool,
+    sampling: SamplingParams,
+    resp: oneshot::Sender<Result<u32, String>>,
+}
+
+impl DecodeBatcher {
+    fn start(
+        channel: Channel,
+        session: Arc<Mutex<Option<String>>>,
+        cfg: config::Config,
+        max_batch: usize,
+        delay: Duration,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::channel::<DecodeJob>(1024);
+        tokio::spawn(async move {
+            loop {
+                let first = match rx.recv().await {
+                    Some(j) => j,
+                    None => break,
+                };
+                // only support sample_in_worker=true in batcher path
+                if !first.sample_in_worker {
+                    let _ = first
+                        .resp
+                        .send(Err("batcher only supports sample_in_worker=true".into()));
+                    continue;
+                }
+                let mut batch = vec![first];
+                let start = tokio::time::Instant::now();
+                while batch.len() < max_batch {
+                    let remain = delay.saturating_sub(start.elapsed());
+                    if remain.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(remain, rx.recv()).await {
+                        Ok(Some(j)) => {
+                            if j.sample_in_worker {
+                                batch.push(j);
+                            } else {
+                                let _ = j.resp.send(Err(
+                                    "batcher only supports sample_in_worker=true".into(),
+                                ));
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+                // ensure session id
+                let sid = if let Some(s) = session.lock().await.as_ref().cloned() {
+                    s
+                } else {
+                    let mut client = EngineWorkerClient::new(channel.clone());
+                    let m = &cfg.model;
+                    let cs = match client
+                        .create_session(CreateSessionRequest {
+                            model_id: m.model_id.clone(),
+                            dtype: m.dtype.clone(),
+                            device: m.device.clone(),
+                            adapters: m.adapters.clone(),
+                        })
+                        .await
+                    {
+                        Ok(r) => r.into_inner(),
+                        Err(e) => {
+                            for j in batch {
+                                let _ = j.resp.send(Err(format!("create_session error: {}", e)));
+                            }
+                            continue;
+                        }
+                    };
+                    if !cs.ok {
+                        for j in batch {
+                            let _ = j
+                                .resp
+                                .send(Err(format!("create_session failed: {}", cs.error)));
+                        }
+                        continue;
+                    }
+                    let mut lock = session.lock().await;
+                    *lock = Some(cs.session_id.clone());
+                    cs.session_id
+                };
+                let mut client = EngineWorkerClient::new(channel.clone());
+                let seq_ids: Vec<String> = batch.iter().map(|j| j.seq_id.clone()).collect();
+                let last_tokens: Vec<u32> = batch.iter().map(|j| j.token).collect();
+                let pos_list: Vec<u32> = batch.iter().map(|j| j.pos).collect();
+                let sampling = batch.get(0).map(|j| j.sampling.clone()).unwrap_or_default();
+                let req = BatchDecodeRequest {
+                    session_id: sid,
+                    seq_ids,
+                    last_tokens,
+                    pos_list,
+                    sample_in_worker: true,
+                    sampling: Some(sampling),
+                };
+                match client.batch_decode(req).await {
+                    Ok(resp) => {
+                        let inner = resp.into_inner();
+                        if !inner.ok {
+                            let err = inner.error;
+                            for j in batch {
+                                let _ = j.resp.send(Err(err.clone()));
+                            }
+                            continue;
+                        }
+                        let outs = inner.next_tokens;
+                        if outs.len() != batch.len() {
+                            let err = format!(
+                                "mismatched next_tokens: {} vs {}",
+                                outs.len(),
+                                batch.len()
+                            );
+                            for j in batch {
+                                let _ = j.resp.send(Err(err.clone()));
+                            }
+                            continue;
+                        }
+                        for (j, t) in batch.into_iter().zip(outs.into_iter()) {
+                            let _ = j.resp.send(Ok(t));
+                        }
+                    }
+                    Err(e) => {
+                        let err = e.to_string();
+                        for j in batch {
+                            let _ = j.resp.send(Err(err.clone()));
+                        }
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    async fn decode(
+        &self,
+        seq_id: String,
+        token: u32,
+        pos: u32,
+        sample_in_worker: bool,
+        sampling: SamplingParams,
+    ) -> Result<u32, String> {
+        let (tx, rx) = oneshot::channel();
+        let job = DecodeJob {
+            seq_id,
+            token,
+            pos,
+            sample_in_worker,
+            sampling,
+            resp: tx,
+        };
+        self.tx.send(job).await.map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+}
+
+#[derive(Clone)]
+struct PrefillBatcher {
+    tx: mpsc::Sender<PrefillJob>,
+}
+
+struct PrefillJob {
+    seq_id: String,
+    tokens: Vec<u32>,
+    start_pos: u32,
+    return_last_logits: bool,
+    resp: oneshot::Sender<Result<u32, String>>, // consumed only
+}
+
+impl PrefillBatcher {
+    fn start(
+        channel: Channel,
+        session: Arc<Mutex<Option<String>>>,
+        cfg: config::Config,
+        max_batch: usize,
+        delay: Duration,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::channel::<PrefillJob>(1024);
+        tokio::spawn(async move {
+            loop {
+                let first = match rx.recv().await {
+                    Some(j) => j,
+                    None => break,
+                };
+                let mut batch = vec![first];
+                let start = tokio::time::Instant::now();
+                while batch.len() < max_batch {
+                    let remain = delay.saturating_sub(start.elapsed());
+                    if remain.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(remain, rx.recv()).await {
+                        Ok(Some(j)) => batch.push(j),
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+                // ensure session
+                let sid = if let Some(s) = session.lock().await.as_ref().cloned() {
+                    s
+                } else {
+                    let mut client = EngineWorkerClient::new(channel.clone());
+                    let m = &cfg.model;
+                    let cs = match client
+                        .create_session(CreateSessionRequest {
+                            model_id: m.model_id.clone(),
+                            dtype: m.dtype.clone(),
+                            device: m.device.clone(),
+                            adapters: m.adapters.clone(),
+                        })
+                        .await
+                    {
+                        Ok(r) => r.into_inner(),
+                        Err(e) => {
+                            for j in batch {
+                                let _ = j.resp.send(Err(format!("create_session error: {}", e)));
+                            }
+                            continue;
+                        }
+                    };
+                    if !cs.ok {
+                        for j in batch {
+                            let _ = j
+                                .resp
+                                .send(Err(format!("create_session failed: {}", cs.error)));
+                        }
+                        continue;
+                    }
+                    let mut lock = session.lock().await;
+                    *lock = Some(cs.session_id.clone());
+                    cs.session_id
+                };
+                let mut client = EngineWorkerClient::new(channel.clone());
+                let seq_ids: Vec<String> = batch.iter().map(|j| j.seq_id.clone()).collect();
+                let tokens_list: Vec<Tokens> = batch
+                    .iter()
+                    .map(|j| Tokens {
+                        tokens: j.tokens.clone(),
+                    })
+                    .collect();
+                let start_pos_list: Vec<u32> = batch.iter().map(|j| j.start_pos).collect();
+                let return_last_logits = batch.iter().any(|j| j.return_last_logits);
+                let req = BatchPrefillRequest {
+                    session_id: sid,
+                    seq_ids,
+                    tokens_list,
+                    start_pos_list,
+                    return_last_logits,
+                };
+                match client.batch_prefill(req).await {
+                    Ok(resp) => {
+                        let inner = resp.into_inner();
+                        if !inner.ok {
+                            let err = inner.error;
+                            for j in batch {
+                                let _ = j.resp.send(Err(err.clone()));
+                            }
+                            continue;
+                        }
+                        let outs = inner.consumed_list;
+                        if outs.len() != batch.len() {
+                            let err = format!(
+                                "mismatched consumed_list: {} vs {}",
+                                outs.len(),
+                                batch.len()
+                            );
+                            for j in batch {
+                                let _ = j.resp.send(Err(err.clone()));
+                            }
+                            continue;
+                        }
+                        for (j, c) in batch.into_iter().zip(outs.into_iter()) {
+                            let _ = j.resp.send(Ok(c));
+                        }
+                    }
+                    Err(e) => {
+                        let err = e.to_string();
+                        for j in batch {
+                            let _ = j.resp.send(Err(err.clone()));
+                        }
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    async fn prefill(
+        &self,
+        seq_id: String,
+        tokens: Vec<u32>,
+        start_pos: u32,
+        return_last_logits: bool,
+    ) -> Result<u32, String> {
+        let (tx, rx) = oneshot::channel();
+        let job = PrefillJob {
+            seq_id,
+            tokens,
+            start_pos,
+            return_last_logits,
+            resp: tx,
+        };
+        self.tx.send(job).await.map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
 }
 
 #[tokio::main]
@@ -28,7 +382,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // load config
-    let cfg_path = std::env::var("DEEPINFER_CONFIG").unwrap_or_else(|_| "config/default.yaml".to_string());
+    let cfg_path =
+        std::env::var("DEEPINFER_CONFIG").unwrap_or_else(|_| "config/default.yaml".to_string());
     let cfg = config::Config::from_file(&cfg_path)?;
 
     // connect to worker (tonic channel is cheap to clone)
@@ -40,7 +395,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer = Tokenizer::from_file(&cfg.model.tokenizer_json)
         .map_err(|e| format!("failed to load tokenizer: {}", e))?;
 
-    let state = AppState { channel, config: cfg.clone(), tokenizer: Arc::new(tokenizer) };
+    // batcher config via env (defaults)
+    let max_batch: usize = std::env::var("BATCH_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let delay_ms: u64 = std::env::var("BATCH_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+
+    // shared session for batching across requests
+    let session: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let decode_batcher = DecodeBatcher::start(
+        channel.clone(),
+        session.clone(),
+        cfg.clone(),
+        max_batch,
+        Duration::from_millis(delay_ms),
+    );
+    let prefill_batcher = PrefillBatcher::start(
+        channel.clone(),
+        session.clone(),
+        cfg.clone(),
+        max_batch,
+        Duration::from_millis(delay_ms),
+    );
+
+    let state = AppState {
+        channel,
+        config: cfg.clone(),
+        tokenizer: Arc::new(tokenizer),
+        session,
+        decode_batcher,
+        prefill_batcher,
+    };
 
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -57,7 +446,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut client = EngineWorkerClient::new(state.channel.clone());
-    let res = client.health(HealthRequest{}).await;
+    let res = client.health(HealthRequest {}).await;
     match res {
         Ok(resp) => {
             let inner = resp.into_inner();
@@ -97,7 +486,7 @@ struct SamplingIn {
 
 impl SamplingIn {
     fn to_proto(&self) -> SamplingParams {
-        SamplingParams{
+        SamplingParams {
             temperature: self.temperature.unwrap_or(1.0),
             top_k: self.top_k.unwrap_or(0),
             top_p: self.top_p.unwrap_or(1.0),
@@ -121,42 +510,48 @@ struct GenerateIn {
     sampling: Option<SamplingIn>,
 }
 
-async fn generate_handler(State(state): State<AppState>, Json(input): Json<GenerateIn>) -> Response {
+async fn generate_handler(
+    State(state): State<AppState>,
+    Json(input): Json<GenerateIn>,
+) -> Response {
     let mut client = EngineWorkerClient::new(state.channel.clone());
 
-    // Create a session per request (for demo)
-    let m = &state.config.model;
-    let cs = client.create_session(CreateSessionRequest{
-        model_id: m.model_id.clone(),
-        dtype: m.dtype.clone(),
-        device: m.device.clone(),
-        adapters: m.adapters.clone(),
-    }).await.expect("create_session failed").into_inner();
-    assert!(cs.ok, "worker returned error: {}", cs.error);
+    // Ensure a shared session (for batching)
+    let session_id = state.ensure_session().await;
 
-    let ss = client.start_sequence(StartSequenceRequest{ session_id: cs.session_id.clone() })
-        .await.expect("start_sequence failed").into_inner();
+    // Start a new sequence per request
+    let ss = client
+        .start_sequence(StartSequenceRequest {
+            session_id: session_id.clone(),
+        })
+        .await
+        .expect("start_sequence failed")
+        .into_inner();
     assert!(ss.ok, "worker returned error: {}", ss.error);
 
     // real tokenization via tokenizers
-    let encoding = state.tokenizer.encode(input.prompt.clone(), true)
-        .map_err(|e| format!("tokenize error: {}", e)).unwrap();
-    let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
+    let encoding = state
+        .tokenizer
+        .encode(input.prompt.clone(), true)
+        .map_err(|e| format!("tokenize error: {}", e))
+        .unwrap();
+    let tokens: Vec<u32> = encoding.get_ids().to_vec();
 
-    let pre = client.prefill(PrefillRequest{
-        session_id: cs.session_id.clone(),
-        seq_id: ss.seq_id.clone(),
-        tokens: tokens.clone(),
-        start_pos: 0,
-        return_last_logits: false,
-    }).await.expect("prefill failed").into_inner();
-    assert!(pre.ok, "worker prefill error: {}", pre.error);
+    // Batch prefill via batcher
+    let consumed = state
+        .prefill_batcher
+        .prefill(ss.seq_id.clone(), tokens.clone(), 0, false)
+        .await
+        .expect("batch prefill failed");
 
     // start with last prompt token (or EOS if empty)
     let eos_id = state.tokenizer.token_to_id("<|endoftext|>").unwrap_or(0);
     let mut cur_token: u32 = tokens.last().copied().unwrap_or(eos_id);
-    let mut pos: u32 = pre.consumed;
-    let steps = input.max_new_tokens.or(state.config.max_new_tokens_default).unwrap_or(8);
+    let mut pos: u32 = consumed;
+    let steps = input
+        .max_new_tokens
+        .or(state.config.max_new_tokens_default)
+        .unwrap_or(8);
 
     let do_stream = input.stream.unwrap_or(false);
     let do_sample_in_worker = input.sample_in_worker.unwrap_or(true);
@@ -165,68 +560,110 @@ async fn generate_handler(State(state): State<AppState>, Json(input): Json<Gener
     if do_stream {
         // SSE streaming
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
-        let channel = state.channel.clone();
-        let tokenizer = state.tokenizer.clone();
-        let session_id = cs.session_id.clone();
+        let st = state.clone();
         let seq_id = ss.seq_id.clone();
         let mut init_tokens = tokens.clone();
 
         tokio::spawn(async move {
-            let mut client = EngineWorkerClient::new(channel);
+            let mut client = EngineWorkerClient::new(st.channel.clone());
             let mut prev_text = String::new();
 
             // send a start event
-            let _ = tx.send(Ok(Event::default().json_data(serde_json::json!({
-                "event": "start"
-            })).unwrap())).await;
+            let _ = tx
+                .send(Ok(Event::default()
+                    .json_data(serde_json::json!({
+                        "event": "start"
+                    }))
+                    .unwrap()))
+                .await;
 
             for _ in 0..steps {
-                let dec = match client.decode(DecodeRequest{
-                    session_id: session_id.clone(),
-                    seq_id: seq_id.clone(),
-                    token: cur_token,
-                    pos,
-                    sample_in_worker: do_sample_in_worker,
-                    sampling: Some(sampling_params.clone()),
-                }).await {
-                    Ok(r) => r.into_inner(),
-                    Err(e) => {
-                        let _ = tx.send(Ok(Event::default().json_data(serde_json::json!({
-                            "event": "error",
-                            "message": e.to_string()
-                        })).unwrap())).await;
-                        break;
+                let next = if do_sample_in_worker {
+                    match st
+                        .decode_batcher
+                        .decode(
+                            seq_id.clone(),
+                            cur_token,
+                            pos,
+                            true,
+                            sampling_params.clone(),
+                        )
+                        .await
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = tx
+                                .send(Ok(Event::default()
+                                    .json_data(serde_json::json!({
+                                        "event": "error",
+                                        "message": e
+                                    }))
+                                    .unwrap()))
+                                .await;
+                            break;
+                        }
+                    }
+                } else {
+                    // fallback to direct decode when not sampling in worker
+                    match client
+                        .decode(DecodeRequest {
+                            session_id: st.ensure_session().await,
+                            seq_id: seq_id.clone(),
+                            token: cur_token,
+                            pos,
+                            sample_in_worker: false,
+                            sampling: Some(sampling_params.clone()),
+                        })
+                        .await
+                    {
+                        Ok(r) => {
+                            let inner = r.into_inner();
+                            if !inner.ok {
+                                break;
+                            }
+                            // pick argmax on client if needed; but in this path logits are returned; keeping simple
+                            inner.next_token
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(Ok(Event::default()
+                                    .json_data(serde_json::json!({
+                                        "event": "error",
+                                        "message": e.to_string()
+                                    }))
+                                    .unwrap()))
+                                .await;
+                            break;
+                        }
                     }
                 };
-                if !dec.ok {
-                    let _ = tx.send(Ok(Event::default().json_data(serde_json::json!({
-                        "event": "error",
-                        "message": dec.error
-                    })).unwrap())).await;
-                    break;
-                }
-                let next = dec.next_token;
                 init_tokens.push(next);
                 cur_token = next;
                 pos += 1;
 
                 // decode current full text and send delta
-                let text_all = tokenizer.decode(&init_tokens, true).unwrap_or_default();
+                let text_all = st.tokenizer.decode(&init_tokens, true).unwrap_or_default();
                 let delta = text_all.get(prev_text.len()..).unwrap_or("");
                 prev_text = text_all.clone();
 
-                let _ = tx.send(Ok(Event::default().json_data(serde_json::json!({
-                    "event": "delta",
-                    "token": next,
-                    "text_delta": delta,
-                })).unwrap())).await;
+                let _ = tx
+                    .send(Ok(Event::default()
+                        .json_data(serde_json::json!({
+                            "event": "delta",
+                            "token": next,
+                            "text_delta": delta,
+                        }))
+                        .unwrap()))
+                    .await;
             }
 
             // release
-            let _ = client.release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest{
-                session_id: session_id.clone(),
-                seq_id: seq_id.clone(),
-            }).await;
+            let _ = client
+                .release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest {
+                    session_id: st.ensure_session().await,
+                    seq_id: seq_id.clone(),
+                })
+                .await;
 
             // done
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
@@ -239,31 +676,57 @@ async fn generate_handler(State(state): State<AppState>, Json(input): Json<Gener
     // non-stream path: generate then return final JSON
     let mut new_tokens = Vec::with_capacity(steps as usize);
     for _ in 0..steps {
-        let dec = client.decode(DecodeRequest{
-            session_id: cs.session_id.clone(),
-            seq_id: ss.seq_id.clone(),
-            token: cur_token,
-            pos,
-            sample_in_worker: do_sample_in_worker,
-            sampling: Some(sampling_params.clone()),
-        }).await.expect("decode failed").into_inner();
-        assert!(dec.ok, "worker decode error: {}", dec.error);
-        let next = dec.next_token;
+        let next = if do_sample_in_worker {
+            state
+                .decode_batcher
+                .decode(
+                    ss.seq_id.clone(),
+                    cur_token,
+                    pos,
+                    true,
+                    sampling_params.clone(),
+                )
+                .await
+                .expect("batch decode failed")
+        } else {
+            let dec = client
+                .decode(DecodeRequest {
+                    session_id: session_id.clone(),
+                    seq_id: ss.seq_id.clone(),
+                    token: cur_token,
+                    pos,
+                    sample_in_worker: false,
+                    sampling: Some(sampling_params.clone()),
+                })
+                .await
+                .expect("decode failed")
+                .into_inner();
+            assert!(dec.ok, "worker decode error: {}", dec.error);
+            dec.next_token
+        };
         new_tokens.push(next);
         cur_token = next;
         pos += 1;
     }
 
     // best-effort release (ignore error)
-    let _ = client.release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest{
-        session_id: cs.session_id,
-        seq_id: ss.seq_id,
-    }).await;
+    let _ = client
+        .release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest {
+            session_id: session_id,
+            seq_id: ss.seq_id,
+        })
+        .await;
 
     // decode full sequence (prompt + new tokens)
     let mut all_tokens = tokens.clone();
     all_tokens.extend_from_slice(&new_tokens);
-    let text = state.tokenizer.decode(&all_tokens, true).unwrap_or_else(|_| "".to_string());
-    Json(GenerateOut { text, tokens: all_tokens }).into_response()
+    let text = state
+        .tokenizer
+        .decode(&all_tokens, true)
+        .unwrap_or_else(|_| "".to_string());
+    Json(GenerateOut {
+        text,
+        tokens: all_tokens,
+    })
+    .into_response()
 }
-
