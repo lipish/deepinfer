@@ -406,6 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/v1/generate", post(generate_handler))
+        .route("/v1/chat/completions", post(chat_completions_handler))
         .with_state(state.clone());
 
     let addr: SocketAddr = format!("{}:{}", cfg.server.host, cfg.server.port).parse()?;
@@ -468,6 +469,118 @@ impl SamplingIn {
             seed: self.seed.unwrap_or(0),
         }
     }
+}
+
+#[derive(Deserialize, Clone)]
+struct ChatMessageIn {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ChatMessageOut {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatCompletionsIn {
+    #[serde(default)]
+    model: Option<String>,
+    messages: Vec<ChatMessageIn>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    stream: Option<bool>,
+    // OpenAI-style sampling fields (subset)
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    top_p: Option<f32>,
+    #[serde(default)]
+    frequency_penalty: Option<f32>,
+    #[serde(default)]
+    presence_penalty: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct Usage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct ChatChoiceOut {
+    index: u32,
+    message: ChatMessageOut,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChatCompletionsOut {
+    id: String,
+    object: String,
+    created: u64,
+    model: String,
+    choices: Vec<ChatChoiceOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
+}
+
+#[derive(Serialize)]
+struct ChatDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChatChunkChoice {
+    index: u32,
+    delta: ChatDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChatCompletionsChunk {
+    id: String,
+    object: String,
+    created: u64,
+    model: String,
+    choices: Vec<ChatChunkChoice>,
+}
+
+fn build_prompt_from_messages(msgs: &[ChatMessageIn]) -> String {
+    let mut s = String::new();
+    for m in msgs.iter() {
+        match m.role.as_str() {
+            "system" => {
+                s.push_str("System: ");
+                s.push_str(&m.content);
+                s.push_str("\n\n");
+            }
+            "user" => {
+                s.push_str("User: ");
+                s.push_str(&m.content);
+                s.push_str("\n\n");
+            }
+            "assistant" => {
+                s.push_str("Assistant: ");
+                s.push_str(&m.content);
+                s.push_str("\n\n");
+            }
+            _ => {
+                s.push_str(&m.content);
+                s.push_str("\n\n");
+            }
+        }
+    }
+    s.push_str("Assistant: ");
+    s
 }
 
 #[derive(Deserialize)]
@@ -722,4 +835,160 @@ async fn generate_handler(
         tokens: all_tokens,
     })
     .into_response()
+}
+
+async fn chat_completions_handler(
+    State(state): State<AppState>,
+    Json(input): Json<ChatCompletionsIn>,
+) -> Response {
+    // pick worker RR
+    let wk = state.pick_worker().await;
+    let mut client = EngineWorkerClient::new(wk.channel.clone());
+
+    // Build prompt from messages
+    let prompt = build_prompt_from_messages(&input.messages);
+    let encoding = state
+        .tokenizer
+        .encode(prompt, true)
+        .map_err(|e| format!("tokenize error: {}", e))
+        .unwrap();
+    let tokens: Vec<u32> = encoding.get_ids().to_vec();
+
+    // ensure session
+    let session_id = if let Some(s) = wk.session.lock().await.as_ref().cloned() { s } else {
+        let m = &state.config.model;
+        let cs = client.create_session(CreateSessionRequest{ model_id: m.model_id.clone(), dtype: m.dtype.clone(), device: m.device.clone(), adapters: m.adapters.clone() }).await.expect("create_session failed").into_inner();
+        assert!(cs.ok, "worker returned error: {}", cs.error);
+        let mut lock = wk.session.lock().await; *lock = Some(cs.session_id.clone()); cs.session_id
+    };
+
+    // start sequence
+    let ss = client
+        .start_sequence(StartSequenceRequest{ session_id: session_id.clone() })
+        .await.expect("start_sequence failed").into_inner();
+    assert!(ss.ok, "worker returned error: {}", ss.error);
+
+    // prefill
+    let consumed = wk.prefill_batcher
+        .prefill(ss.seq_id.clone(), tokens.clone(), 0, false)
+        .await.expect("batch prefill failed");
+
+    // sampling params from chat input
+    let sampling = SamplingIn{
+        temperature: input.temperature,
+        top_k: None,
+        top_p: input.top_p,
+        repetition_penalty: None,
+        frequency_penalty: input.frequency_penalty.or(input.presence_penalty),
+        seed: None,
+    }.to_proto();
+
+    // controls
+    let steps = input.max_tokens.or(state.config.max_new_tokens_default).unwrap_or(8);
+    let do_stream = input.stream.unwrap_or(false);
+    let model_name = input.model.unwrap_or_else(|| state.config.model.model_id.clone());
+
+    // starting token is last of prompt or EOS
+    let eos_id = state.tokenizer.token_to_id("<|endoftext|>").unwrap_or(0);
+    let mut cur_token: u32 = tokens.last().copied().unwrap_or(eos_id);
+    let mut pos: u32 = consumed;
+
+    // OpenAI fields
+    let created: u64 = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let id = format!("chatcmpl-{}", created);
+
+    if do_stream {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+        let st = state.clone();
+        let wk2 = wk.clone();
+        let seq_id = ss.seq_id.clone();
+        let mut init_tokens = tokens.clone();
+        tokio::spawn(async move {
+            let mut client = EngineWorkerClient::new(wk2.channel.clone());
+            // First chunk with role
+            let first = ChatCompletionsChunk{
+                id: id.clone(),
+                object: "chat.completion.chunk".to_string(),
+                created,
+                model: model_name.clone(),
+                choices: vec![ChatChunkChoice{ index: 0, delta: ChatDelta{ role: Some("assistant".to_string()), content: None }, finish_reason: None }],
+            };
+            let _ = tx.send(Ok(Event::default().json_data(first).unwrap())).await;
+
+            let mut prev_text = String::new();
+            for _ in 0..steps {
+                let next = match wk2.decode_batcher.decode(seq_id.clone(), cur_token, pos, true, sampling.clone()).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // send an error-like finish
+                        let done = ChatCompletionsChunk{
+                            id: id.clone(), object: "chat.completion.chunk".to_string(), created, model: model_name.clone(),
+                            choices: vec![ChatChunkChoice{ index: 0, delta: ChatDelta{ role: None, content: None }, finish_reason: Some(format!("error:{}", e)) }]
+                        };
+                        let _ = tx.send(Ok(Event::default().json_data(done).unwrap())).await;
+                        break;
+                    }
+                };
+                init_tokens.push(next);
+                cur_token = next;
+                pos += 1;
+
+                let text_all = st.tokenizer.decode(&init_tokens, true).unwrap_or_default();
+                let delta_txt = text_all.get(prev_text.len()..).unwrap_or("").to_string();
+                prev_text = text_all;
+
+                if !delta_txt.is_empty() {
+                    let chunk = ChatCompletionsChunk{
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model_name.clone(),
+                        choices: vec![ChatChunkChoice{ index: 0, delta: ChatDelta{ role: None, content: Some(delta_txt) }, finish_reason: None }],
+                    };
+                    let _ = tx.send(Ok(Event::default().json_data(chunk).unwrap())).await;
+                }
+            }
+            // best-effort release
+            let sid = wk2.session.lock().await.clone().unwrap_or_default();
+            if !sid.is_empty() {
+                let _ = client.release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest{ session_id: sid, seq_id: seq_id.clone() }).await;
+            }
+            // final done chunk
+            let done = ChatCompletionsChunk{
+                id: id.clone(), object: "chat.completion.chunk".to_string(), created, model: model_name.clone(),
+                choices: vec![ChatChunkChoice{ index: 0, delta: ChatDelta{ role: None, content: None }, finish_reason: Some("stop".to_string()) }]
+            };
+            let _ = tx.send(Ok(Event::default().json_data(done).unwrap())).await;
+            // [DONE]
+            let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+        });
+        let stream = ReceiverStream::new(rx);
+        return Sse::new(stream).into_response();
+    }
+
+    // non-stream: generate tokens
+    let mut new_tokens = Vec::with_capacity(steps as usize);
+    for _ in 0..steps {
+        let next = wk.decode_batcher.decode(ss.seq_id.clone(), cur_token, pos, true, sampling.clone()).await.expect("batch decode failed");
+        new_tokens.push(next);
+        cur_token = next;
+        pos += 1;
+    }
+    // best-effort release
+    let _ = client.release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest{ session_id: session_id.clone(), seq_id: ss.seq_id.clone() }).await;
+
+    // decode text
+    let mut all_tokens = tokens.clone();
+    all_tokens.extend_from_slice(&new_tokens);
+    let text = state.tokenizer.decode(&all_tokens, true).unwrap_or_else(|_| "".to_string());
+
+    let out = ChatCompletionsOut{
+        id,
+        object: "chat.completion".to_string(),
+        created,
+        model: model_name,
+        choices: vec![ChatChoiceOut{ index: 0, message: ChatMessageOut{ role: "assistant".to_string(), content: text.clone() }, finish_reason: Some("stop".to_string()) }],
+        usage: Some(Usage{ prompt_tokens: tokens.len() as u32, completion_tokens: new_tokens.len() as u32, total_tokens: (tokens.len() + new_tokens.len()) as u32 }),
+    };
+    Json(out).into_response()
 }
