@@ -19,6 +19,8 @@ pub struct ServerConfig {
 #[derive(Clone, Deserialize)]
 pub struct WorkerConfig {
     pub address: String, // e.g., http://127.0.0.1:50051
+    #[serde(default)]
+    pub addresses: Vec<String>, // optional multi-worker list
 }
 
 #[derive(Clone, Deserialize)]
@@ -38,4 +40,3 @@ impl Config {
         Ok(cfg)
     }
 }
-

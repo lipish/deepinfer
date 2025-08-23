@@ -4,6 +4,7 @@ server:
 
 worker:
   address: "http://127.0.0.1:50051"
+  addresses: []
 
 model:
   model_id: "sshleifer/tiny-gpt2"

@@ -24,38 +24,27 @@ use worker_proto::engine::v1::{
 
 #[derive(Clone)]
 struct AppState {
-    channel: Channel,
     config: config::Config,
     tokenizer: Arc<Tokenizer>,
-    // shared session for batching across requests
-    session: Arc<Mutex<Option<String>>>,
-    // batchers
-    decode_batcher: DecodeBatcher,
-    prefill_batcher: PrefillBatcher,
+    workers: Arc<Vec<WorkerCtx>>,
+    rr: Arc<Mutex<usize>>, // round-robin cursor
 }
 
 impl AppState {
-    async fn ensure_session(&self) -> String {
-        if let Some(s) = self.session.lock().await.as_ref().cloned() {
-            return s;
-        }
-        let mut client = EngineWorkerClient::new(self.channel.clone());
-        let m = &self.config.model;
-        let cs = client
-            .create_session(CreateSessionRequest {
-                model_id: m.model_id.clone(),
-                dtype: m.dtype.clone(),
-                device: m.device.clone(),
-                adapters: m.adapters.clone(),
-            })
-            .await
-            .expect("create_session failed")
-            .into_inner();
-        assert!(cs.ok, "worker returned error: {}", cs.error);
-        let sid = cs.session_id;
-        *self.session.lock().await = Some(sid.clone());
-        sid
+    async fn pick_worker(&self) -> WorkerCtx {
+        let mut idx = self.rr.lock().await;
+        let i = *idx % self.workers.len();
+        *idx = *idx + 1;
+        self.workers[i].clone()
     }
+}
+
+#[derive(Clone)]
+struct WorkerCtx {
+    channel: Channel,
+    session: Arc<Mutex<Option<String>>>,
+    decode_batcher: DecodeBatcher,
+    prefill_batcher: PrefillBatcher,
 }
 
 #[derive(Clone)]
@@ -386,49 +375,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("DEEPINFER_CONFIG").unwrap_or_else(|_| "config/default.yaml".to_string());
     let cfg = config::Config::from_file(&cfg_path)?;
 
-    // connect to worker (tonic channel is cheap to clone)
-    let channel = Channel::from_shared(cfg.worker.address.clone())?
-        .connect()
-        .await?;
+    // connect to workers (support single or multiple)
+    let mut worker_addrs = cfg.worker.addresses.clone();
+    if worker_addrs.is_empty() {
+        worker_addrs.push(cfg.worker.address.clone());
+    }
+    let mut workers: Vec<WorkerCtx> = Vec::new();
+    for addr in worker_addrs.iter() {
+        let channel = Channel::from_shared(addr.clone())?.connect().await?;
+        // per-worker session and batchers
+        let session: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let max_batch: usize = std::env::var("BATCH_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        let delay_ms: u64 = std::env::var("BATCH_DELAY_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+        let decode_batcher = DecodeBatcher::start(channel.clone(), session.clone(), cfg.clone(), max_batch, Duration::from_millis(delay_ms));
+        let prefill_batcher = PrefillBatcher::start(channel.clone(), session.clone(), cfg.clone(), max_batch, Duration::from_millis(delay_ms));
+        workers.push(WorkerCtx { channel, session, decode_batcher, prefill_batcher });
+    }
 
     // load tokenizer
     let tokenizer = Tokenizer::from_file(&cfg.model.tokenizer_json)
         .map_err(|e| format!("failed to load tokenizer: {}", e))?;
 
-    // batcher config via env (defaults)
-    let max_batch: usize = std::env::var("BATCH_MAX")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    let delay_ms: u64 = std::env::var("BATCH_DELAY_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
-
-    // shared session for batching across requests
-    let session: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let decode_batcher = DecodeBatcher::start(
-        channel.clone(),
-        session.clone(),
-        cfg.clone(),
-        max_batch,
-        Duration::from_millis(delay_ms),
-    );
-    let prefill_batcher = PrefillBatcher::start(
-        channel.clone(),
-        session.clone(),
-        cfg.clone(),
-        max_batch,
-        Duration::from_millis(delay_ms),
-    );
-
     let state = AppState {
-        channel,
         config: cfg.clone(),
         tokenizer: Arc::new(tokenizer),
-        session,
-        decode_batcher,
-        prefill_batcher,
+        workers: Arc::new(workers),
+        rr: Arc::new(Mutex::new(0)),
     };
 
     let app = Router::new()
@@ -445,7 +417,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let mut client = EngineWorkerClient::new(state.channel.clone());
+    // ping the first worker for health
+    let mut client = EngineWorkerClient::new(state.workers[0].channel.clone());
     let res = client.health(HealthRequest {}).await;
     match res {
         Ok(resp) => {
@@ -514,10 +487,17 @@ async fn generate_handler(
     State(state): State<AppState>,
     Json(input): Json<GenerateIn>,
 ) -> Response {
-    let mut client = EngineWorkerClient::new(state.channel.clone());
+    // pick a worker (round-robin)
+    let wk = state.pick_worker().await;
+    let mut client = EngineWorkerClient::new(wk.channel.clone());
 
     // Ensure a shared session (for batching)
-    let session_id = state.ensure_session().await;
+    let session_id = if let Some(s) = wk.session.lock().await.as_ref().cloned() { s } else {
+        let m = &state.config.model;
+        let cs = client.create_session(CreateSessionRequest{ model_id: m.model_id.clone(), dtype: m.dtype.clone(), device: m.device.clone(), adapters: m.adapters.clone() }).await.expect("create_session failed").into_inner();
+        assert!(cs.ok, "worker returned error: {}", cs.error);
+        let mut lock = wk.session.lock().await; *lock = Some(cs.session_id.clone()); cs.session_id
+    };
 
     // Start a new sequence per request
     let ss = client
@@ -538,7 +518,7 @@ async fn generate_handler(
     let tokens: Vec<u32> = encoding.get_ids().to_vec();
 
     // Batch prefill via batcher
-    let consumed = state
+    let consumed = wk
         .prefill_batcher
         .prefill(ss.seq_id.clone(), tokens.clone(), 0, false)
         .await
@@ -561,11 +541,12 @@ async fn generate_handler(
         // SSE streaming
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
         let st = state.clone();
+        let wk2 = wk.clone();
         let seq_id = ss.seq_id.clone();
         let mut init_tokens = tokens.clone();
 
         tokio::spawn(async move {
-            let mut client = EngineWorkerClient::new(st.channel.clone());
+            let mut client = EngineWorkerClient::new(wk2.channel.clone());
             let mut prev_text = String::new();
 
             // send a start event
@@ -579,7 +560,7 @@ async fn generate_handler(
 
             for _ in 0..steps {
                 let next = if do_sample_in_worker {
-                    match st
+                    match wk2
                         .decode_batcher
                         .decode(
                             seq_id.clone(),
@@ -605,9 +586,16 @@ async fn generate_handler(
                     }
                 } else {
                     // fallback to direct decode when not sampling in worker
+                    // ensure a session on this worker
+                    let session_id = if let Some(s) = wk2.session.lock().await.as_ref().cloned() { s } else {
+                        let m = &st.config.model;
+                        let cs = client.create_session(CreateSessionRequest{ model_id: m.model_id.clone(), dtype: m.dtype.clone(), device: m.device.clone(), adapters: m.adapters.clone() }).await.expect("create_session failed").into_inner();
+                        assert!(cs.ok, "worker returned error: {}", cs.error);
+                        let mut lock = wk2.session.lock().await; *lock = Some(cs.session_id.clone()); cs.session_id
+                    };
                     match client
                         .decode(DecodeRequest {
-                            session_id: st.ensure_session().await,
+                            session_id,
                             seq_id: seq_id.clone(),
                             token: cur_token,
                             pos,
@@ -658,12 +646,17 @@ async fn generate_handler(
             }
 
             // release
-            let _ = client
-                .release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest {
-                    session_id: st.ensure_session().await,
-                    seq_id: seq_id.clone(),
-                })
-                .await;
+            // best-effort release on this worker
+            // fetch session id (if any)
+            let sid = wk2.session.lock().await.clone().unwrap_or_default();
+            if !sid.is_empty() {
+                let _ = client
+                    .release_sequence(worker_proto::engine::v1::ReleaseSequenceRequest {
+                        session_id: sid,
+                        seq_id: seq_id.clone(),
+                    })
+                    .await;
+            }
 
             // done
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
@@ -677,7 +670,7 @@ async fn generate_handler(
     let mut new_tokens = Vec::with_capacity(steps as usize);
     for _ in 0..steps {
         let next = if do_sample_in_worker {
-            state
+            wk
                 .decode_batcher
                 .decode(
                     ss.seq_id.clone(),
