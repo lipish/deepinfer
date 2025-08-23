@@ -65,6 +65,16 @@ class EngineWorkerStub(object):
                 request_serializer=engine_dot_v1_dot_engine__pb2.DecodeRequest.SerializeToString,
                 response_deserializer=engine_dot_v1_dot_engine__pb2.DecodeResponse.FromString,
                 _registered_method=True)
+        self.BatchPrefill = channel.unary_unary(
+                '/engine.v1.EngineWorker/BatchPrefill',
+                request_serializer=engine_dot_v1_dot_engine__pb2.BatchPrefillRequest.SerializeToString,
+                response_deserializer=engine_dot_v1_dot_engine__pb2.BatchPrefillResponse.FromString,
+                _registered_method=True)
+        self.BatchDecode = channel.unary_unary(
+                '/engine.v1.EngineWorker/BatchDecode',
+                request_serializer=engine_dot_v1_dot_engine__pb2.BatchDecodeRequest.SerializeToString,
+                response_deserializer=engine_dot_v1_dot_engine__pb2.BatchDecodeResponse.FromString,
+                _registered_method=True)
         self.ReleaseSequence = channel.unary_unary(
                 '/engine.v1.EngineWorker/ReleaseSequence',
                 request_serializer=engine_dot_v1_dot_engine__pb2.ReleaseSequenceRequest.SerializeToString,
@@ -106,6 +116,19 @@ class EngineWorkerServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def BatchPrefill(self, request, context):
+        """Batch variants for simple micro-batching
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BatchDecode(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ReleaseSequence(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -139,6 +162,16 @@ def add_EngineWorkerServicer_to_server(servicer, server):
                     servicer.Decode,
                     request_deserializer=engine_dot_v1_dot_engine__pb2.DecodeRequest.FromString,
                     response_serializer=engine_dot_v1_dot_engine__pb2.DecodeResponse.SerializeToString,
+            ),
+            'BatchPrefill': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchPrefill,
+                    request_deserializer=engine_dot_v1_dot_engine__pb2.BatchPrefillRequest.FromString,
+                    response_serializer=engine_dot_v1_dot_engine__pb2.BatchPrefillResponse.SerializeToString,
+            ),
+            'BatchDecode': grpc.unary_unary_rpc_method_handler(
+                    servicer.BatchDecode,
+                    request_deserializer=engine_dot_v1_dot_engine__pb2.BatchDecodeRequest.FromString,
+                    response_serializer=engine_dot_v1_dot_engine__pb2.BatchDecodeResponse.SerializeToString,
             ),
             'ReleaseSequence': grpc.unary_unary_rpc_method_handler(
                     servicer.ReleaseSequence,
@@ -282,6 +315,60 @@ class EngineWorker(object):
             '/engine.v1.EngineWorker/Decode',
             engine_dot_v1_dot_engine__pb2.DecodeRequest.SerializeToString,
             engine_dot_v1_dot_engine__pb2.DecodeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchPrefill(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/engine.v1.EngineWorker/BatchPrefill',
+            engine_dot_v1_dot_engine__pb2.BatchPrefillRequest.SerializeToString,
+            engine_dot_v1_dot_engine__pb2.BatchPrefillResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BatchDecode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/engine.v1.EngineWorker/BatchDecode',
+            engine_dot_v1_dot_engine__pb2.BatchDecodeRequest.SerializeToString,
+            engine_dot_v1_dot_engine__pb2.BatchDecodeResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -8,6 +8,9 @@ service EngineWorker {
   rpc StartSequence(StartSequenceRequest) returns (StartSequenceResponse);
   rpc Prefill(PrefillRequest) returns (PrefillResponse);
   rpc Decode(DecodeRequest) returns (DecodeResponse);
+  // Batch variants for simple micro-batching
+  rpc BatchPrefill(BatchPrefillRequest) returns (BatchPrefillResponse);
+  rpc BatchDecode(BatchDecodeRequest) returns (BatchDecodeResponse);
   rpc ReleaseSequence(ReleaseSequenceRequest) returns (ReleaseSequenceResponse);
 }
 
@@ -52,6 +55,27 @@ message PrefillResponse {
   string error = 4;
 }
 
+// Batch prefill: supply multiple sequences; optionally return last logits for each
+message BatchPrefillRequest {
+  string session_id = 1;
+  repeated string seq_ids = 2;
+  repeated Tokens tokens_list = 3; // aligned with seq_ids
+  repeated uint32 start_pos_list = 4;
+  bool return_last_logits = 5;
+}
+message Tokens {
+  repeated uint32 tokens = 1;
+}
+message BatchPrefillResponse {
+  bool ok = 1;
+  repeated uint32 consumed_list = 2;
+  repeated FloatList last_logits_list = 3; // only present if requested
+  string error = 4;
+}
+message FloatList {
+  repeated float values = 1;
+}
+
 message SamplingParams {
   float temperature = 1;
   uint32 top_k = 2;
@@ -77,6 +101,22 @@ message DecodeResponse {
   string error = 5;
 }
 
+// Batch decode: single-step decode for many sequences
+message BatchDecodeRequest {
+  string session_id = 1;
+  repeated string seq_ids = 2;
+  repeated uint32 last_tokens = 3; // last token per seq
+  repeated uint32 pos_list = 4;    // position per seq
+  bool sample_in_worker = 5;
+  SamplingParams sampling = 6;
+}
+message BatchDecodeResponse {
+  bool ok = 1;
+  repeated FloatList logits_list = 2; // when sample_in_worker=false
+  repeated uint32 next_tokens = 3;    // when sample_in_worker=true
+  string error = 4;
+}
+
 message ReleaseSequenceRequest {
   string session_id = 1;
   string seq_id = 2;
@@ -85,4 +125,3 @@ message ReleaseSequenceResponse {
   bool ok = 1;
   string error = 2;
 }
-
