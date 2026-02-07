@@ -1,21 +1,61 @@
 # Rust
-/target
+target/
 **/*.rs.bk
-
-# Editors
-.DS_Store
-*.swp
-*.swo
+Cargo.lock
 
 # Python
 __pycache__/
 *.py[cod]
-python/worker/.venv/
-
-# Node/Other
-yarn.lock
-package-lock.json
-
-# Misc
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 .venv/
+venv/
+ENV/
 
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Configuration overrides
+config/local.toml
+
+# Generated files
+protos/**/*_pb2.py
+protos/**/*_pb2_grpc.py
+protos/**/*_pb2.pyi
+python/xinf_engine/generated/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+/tmp/

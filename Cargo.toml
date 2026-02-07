@@ -1,7 +1,78 @@
 [workspace]
 members = [
-    "crates/worker-proto",
-    "crates/api-server",
+    "crates/xinf-common",
+    "crates/xinf-device",
+    "crates/xinf-meta",
+    "crates/xinf-scheduler",
+    "crates/xinf-router",
+    "crates/xinf-agent",
+    "crates/xinf-gateway",
+    "crates/xinf-cli",
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["xinf contributors"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = "0.1"
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# gRPC
+tonic = "0.11"
+prost = "0.12"
+
+# Tracing and logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Data structures
+dashmap = "5.5"
+sled = "0.34"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+once_cell = "1.19"
+
+# FFI
+libloading = "0.8"
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+
+# Local workspace crates
+xinf-common = { path = "crates/xinf-common" }
+xinf-device = { path = "crates/xinf-device" }
+xinf-meta = { path = "crates/xinf-meta" }
+xinf-scheduler = { path = "crates/xinf-scheduler" }
+xinf-router = { path = "crates/xinf-router" }
+xinf-agent = { path = "crates/xinf-agent" }
+xinf-gateway = { path = "crates/xinf-gateway" }
