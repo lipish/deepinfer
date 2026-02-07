@@ -59,3 +59,23 @@ htmlcov/
 
 # Temporary files
 /tmp/
+
+# etcd runtime data
+data/etcd/
+data/meta/
+
+# Engine logs
+/tmp/engine-*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# vLLM cache
+.vllm_cache/
+
+# Model cache
+.cache/
+
