@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings
 
 class ModelConfig(BaseModel):
     """Model configuration."""
-    name: str = Field(description="Model name or path")
+    name: str = Field(default="meta-llama/Llama-3.1-8B-Instruct", description="Model name or path")
     trust_remote_code: bool = Field(default=False, description="Trust remote code")
     revision: Optional[str] = Field(default=None, description="Model revision")
     tokenizer: Optional[str] = Field(default=None, description="Tokenizer name or path")
