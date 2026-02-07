@@ -5,8 +5,8 @@ This example demonstrates deploying DeepInfer on a machine with NVIDIA RTX 5090 
 ## Prerequisites
 
 1. NVIDIA RTX 5090 GPU
-2. CUDA 12.1+ installed
-3. Python 3.10+
+2. CUDA 12.1+ installed (required for vLLM 0.6.0+ with RTX 5090)
+3. Python 3.9+
 4. At least 50GB free disk space
 
 ## Step 1: Installation
@@ -102,10 +102,10 @@ tail -f deepinfer.log
 
 With RTX 5090 and Llama-3.1-8B-Instruct:
 
-- **Throughput**: ~2,500 tokens/second
+- **Throughput**: ~2,500 tokens/second (estimated, adjust based on actual testing)
 - **Concurrent Users**: Up to 512
-- **Latency**: <100ms for first token
-- **Memory Usage**: ~18GB VRAM
+- **Latency**: <100ms for first token (estimated)
+- **Memory Usage**: ~18GB VRAM (model dependent)
 
 ## Production Deployment
 

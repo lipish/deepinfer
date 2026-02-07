@@ -12,8 +12,8 @@
 
 ### Software Requirements
 - **Operating System**: Linux (Ubuntu 20.04+ recommended), Windows with WSL2, or macOS
-- **Python**: 3.8 or higher (3.10+ recommended)
-- **CUDA**: 12.1 or higher (for RTX 5090)
+- **Python**: 3.9 or higher (3.10+ recommended)
+- **CUDA**: 12.1 or higher (for RTX 5090, recommended for vLLM 0.6.0+)
 - **Driver**: Latest NVIDIA drivers
   - RTX 5090: Driver version 550.54.14 or higher
   - RTX 4090: Driver version 520.61.05 or higher

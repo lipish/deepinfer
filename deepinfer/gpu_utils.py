@@ -69,9 +69,16 @@ class GPUDetector:
                 except:
                     cuda_version_str = "unknown"
                 
-                # Detect specific GPU models
-                is_5090 = "5090" in name or "RTX 5090" in name
-                is_4090 = "4090" in name or "RTX 4090" in name
+                # Detect specific GPU models - use precise matching
+                # Only match official NVIDIA naming patterns
+                is_5090 = False
+                is_4090 = False
+                
+                # Check for RTX 5090 - match official naming
+                if "RTX 5090" in name or "GeForce RTX 5090" in name:
+                    is_5090 = True
+                elif "RTX 4090" in name or "GeForce RTX 4090" in name:
+                    is_4090 = True
                 
                 gpu_info = GPUInfo(
                     id=i,
@@ -132,7 +139,7 @@ class GPUDetector:
             logger.info("Optimizing for NVIDIA RTX 5090")
             return {
                 "device": "cuda",
-                "gpu_memory_utilization": 0.95,  # 5090 has excellent memory management
+                "gpu_memory_utilization": 0.90,  # Conservative default, can increase to 0.95 after testing
                 "tensor_parallel_size": len(self.get_nvidia_5090_gpus()),
                 "enable_chunked_prefill": True,
                 "enable_prefix_caching": True,

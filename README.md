@@ -19,7 +19,7 @@ A high-performance inference engine based on vLLM, optimized for NVIDIA GPUs inc
 - Minimum 8GB GPU VRAM (16GB+ recommended)
 
 ### Software
-- Python 3.8+
+- Python 3.9+
 - CUDA 12.1+ (for RTX 5090)
 - Linux OS (recommended)
 

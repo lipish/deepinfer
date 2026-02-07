@@ -21,8 +21,8 @@ The RTX 5090 configuration (`configs/nvidia_5090.yaml`) includes:
 
 ```yaml
 gpu:
-  # Use 95% of GPU memory (5090 has excellent memory management)
-  gpu_memory_utilization: 0.95
+  # Use 90% of GPU memory (can increase to 0.95 after testing with your workload)
+  gpu_memory_utilization: 0.90
   
   # Higher sequence capacity
   max_num_seqs: 512
@@ -79,8 +79,8 @@ Choose based on GPU VRAM:
 | 8GB      | 0.85                   |
 | 16GB     | 0.88                   |
 | 24GB     | 0.90                   |
-| 40GB+    | 0.92                   |
-| RTX 5090 | 0.95                   |
+| 40GB+    | 0.90                   |
+| RTX 5090 | 0.90 (can increase to 0.95 after testing) |
 
 ### 2. Tensor Parallelism
 

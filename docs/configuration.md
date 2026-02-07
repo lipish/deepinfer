@@ -122,7 +122,7 @@ gpu:
 - **gpu_memory_utilization**: Fraction of GPU memory to use
   - Range: 0.0 - 1.0
   - Default: 0.90
-  - RTX 5090: 0.95
+  - RTX 5090: 0.90 (can increase to 0.95 after testing)
   - RTX 4090: 0.92
   - 24GB GPU: 0.90
   - 16GB GPU: 0.88

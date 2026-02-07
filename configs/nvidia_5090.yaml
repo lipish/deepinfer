@@ -16,8 +16,9 @@ model:
 
 gpu:
   device: "cuda"
-  # RTX 5090 has excellent memory management, can use 95% safely
-  gpu_memory_utilization: 0.95
+  # RTX 5090 has excellent memory management, but start conservatively
+  # Users can increase to 0.95 after testing with their specific workload
+  gpu_memory_utilization: 0.90
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
   max_num_batched_tokens: null

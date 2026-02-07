@@ -141,7 +141,7 @@ def init_config(output: str, model: str, gpu_type: str):
             if hasattr(config.gpu, key):
                 setattr(config.gpu, key, value)
     elif gpu_type == "5090":
-        config.gpu.gpu_memory_utilization = 0.95
+        config.gpu.gpu_memory_utilization = 0.90  # Conservative, can increase after testing
         config.gpu.max_num_seqs = 512
         config.gpu.nvidia_5090_optimizations = True
         config.gpu.enable_chunked_prefill = True
