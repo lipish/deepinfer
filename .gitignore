@@ -1,21 +1,68 @@
-# Rust
-/target
-**/*.rs.bk
-
-# Editors
-.DS_Store
-*.swp
-*.swo
-
 # Python
 __pycache__/
 *.py[cod]
-python/worker/.venv/
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# Node/Other
-yarn.lock
-package-lock.json
-
-# Misc
+# Virtual Environment
+venv/
 .venv/
+ENV/
+env/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Model files and caches
+models/
+*.bin
+*.safetensors
+*.gguf
+.cache/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Config overrides
+my_config.yaml
+local_config.yaml
+
+# Temporary files
+*.tmp
+*.bak
+.tmp/
+tmp/
 

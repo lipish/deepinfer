@@ -1,0 +1,63 @@
+# NVIDIA RTX 5090 Optimized Configuration
+# This configuration is optimized for the NVIDIA RTX 5090 GPU
+# - Maximum memory utilization (95%)
+# - Increased sequence capacity (512)
+# - Chunked prefill enabled for better memory efficiency
+# - Prefix caching for improved performance on repeated prefixes
+# - Auto KV cache dtype for optimal memory/performance balance
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  trust_remote_code: false
+  tokenizer_mode: "auto"
+  dtype: "auto"
+  max_model_len: null
+  quantization: null
+
+gpu:
+  device: "cuda"
+  # RTX 5090 has excellent memory management, can use 95% safely
+  gpu_memory_utilization: 0.95
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  max_num_batched_tokens: null
+  # RTX 5090 can handle more concurrent sequences
+  max_num_seqs: 512
+  max_paddings: 512
+  # Enable chunked prefill for better memory efficiency with long contexts
+  enable_chunked_prefill: true
+  # Prefix caching improves performance on repeated prefixes
+  enable_prefix_caching: true
+  disable_log_stats: false
+  # Enable RTX 5090 specific optimizations
+  nvidia_5090_optimizations: true
+  # Auto KV cache dtype for optimal memory/performance
+  kv_cache_dtype: "auto"
+  # Use CUDA graphs for better performance (set to true if you encounter issues)
+  enforce_eager: false
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  log_level: "info"
+  api_key: null
+  allowed_origins:
+    - "*"
+  timeout: 600
+
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: -1
+  max_tokens: 512
+  presence_penalty: 0.0
+  frequency_penalty: 0.0
+  repetition_penalty: 1.0
+  stop: null
+
+# Notes for RTX 5090:
+# - The RTX 5090 features the latest Ada Lovelace architecture with improved tensor cores
+# - It has 32GB of GDDR7 memory with higher bandwidth
+# - Supports CUDA 12.1+ for optimal performance
+# - Can handle larger batch sizes and longer context windows
+# - Excellent for serving multiple concurrent requests

@@ -1,42 +1,111 @@
-# deepinfer (skeleton)
+# DeepInfer
 
-Rust API server + Python gRPC worker skeleton for a vLLM-like engine.
+A high-performance inference engine based on vLLM, optimized for NVIDIA GPUs including the latest RTX 5090.
 
-What you get:
-- gRPC proto definition (EngineWorker)
-- Rust workspace:
-  - api-server: minimal HTTP API that calls the Python worker via gRPC
-  - worker-proto: generated gRPC client types
-- Python worker (grpc.aio) with placeholder logic (no real model)
-- YAML config and dev scripts
+## Features
 
-Prerequisites:
-- Rust toolchain (stable)
-- Python 3.9+
+- 🚀 Built on vLLM for state-of-the-art inference performance
+- 🎮 Native support for NVIDIA 5090 GPU with automatic detection
+- 📊 Efficient memory management with PagedAttention
+- 🔧 Easy configuration and deployment
+- 🌐 RESTful API compatible with OpenAI format
+- 📈 Real-time monitoring and metrics
 
-Quickstart:
-0) Fetch a tokenizer.json (GPT-2)
-   bash scripts/fetch.tokenizer.json.sh
+## Requirements
 
-1) Start the Python worker (first run creates venv, installs torch/transformers, generates Python stubs)
-   bash scripts/dev.run.worker.sh
+### Hardware
+- NVIDIA GPU (GTX 1080 or newer)
+- Optimized for RTX 4090/5090
+- Minimum 8GB GPU VRAM (16GB+ recommended)
 
-2) Start the Rust API server
-   bash scripts/dev.run.api.sh
+### Software
+- Python 3.8+
+- CUDA 12.1+ (for RTX 5090)
+- Linux OS (recommended)
 
-3) Test (non-stream)
-   curl http://127.0.0.1:8080/health
-   curl -X POST http://127.0.0.1:8080/v1/generate \
-        -H 'Content-Type: application/json' \
-        -d '{"prompt":"hello vllm-like", "max_new_tokens":5, "temperature":1.0}'
+## Quick Start
 
-4) Test (SSE stream)
-   curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
-        -X POST http://127.0.0.1:8080/v1/generate \
-        -d '{"prompt":"hello vllm-like", "max_new_tokens":5, "stream":true, "sampling":{"temperature":1.0, "top_p":0.9}}'
+### Installation
 
-Notes:
-- API uses Rust tokenizers to encode/decode with tokenizer.json (GPT-2 BPE).
-- Python worker runs sshleifer/tiny-gpt2 on CPU with caching past_key_values and sampling.
-- This is still a scaffold suitable for correctness and E2E plumbing. Performance optimizations and batching are to be added.
+1. Clone the repository:
+```bash
+git clone https://github.com/lipish/deepinfer.git
+cd deepinfer
+```
 
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+3. Install vLLM (with CUDA 12.1 for RTX 5090):
+```bash
+pip install vllm>=0.6.0
+```
+
+### Basic Usage
+
+1. Start the inference server:
+```bash
+python -m deepinfer.server --model meta-llama/Llama-3.1-8B-Instruct
+```
+
+2. Make an inference request:
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "prompt": "Hello, how are you?",
+    "max_tokens": 100
+  }'
+```
+
+### NVIDIA 5090 Optimization
+
+For RTX 5090, use the optimized configuration:
+```bash
+python -m deepinfer.server \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --config configs/nvidia_5090.yaml
+```
+
+## Configuration
+
+See the `configs/` directory for example configurations:
+- `default.yaml`: Default configuration
+- `nvidia_5090.yaml`: Optimized for RTX 5090
+- `nvidia_4090.yaml`: Optimized for RTX 4090
+
+## Documentation
+
+- [Installation Guide](docs/installation.md)
+- [API Reference](docs/api.md)
+- [Configuration Guide](docs/configuration.md)
+- [GPU Optimization](docs/gpu_optimization.md)
+
+## Architecture
+
+DeepInfer is built on vLLM and provides:
+- Automatic GPU detection and configuration
+- Model loading and caching
+- Request batching and scheduling
+- Streaming and non-streaming inference
+- Multi-GPU support (tensor parallelism)
+
+## Examples
+
+See the `examples/` directory for various usage examples:
+- Basic inference
+- Streaming responses
+- Batch processing
+- Custom sampling parameters
+- Multi-GPU deployment
+
+## License
+
+MIT License - see LICENSE file for details
+
+## Contributing
+
+Contributions are welcome! Please see CONTRIBUTING.md for guidelines.
