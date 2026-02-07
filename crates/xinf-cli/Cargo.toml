@@ -1,0 +1,27 @@
+[package]
+name = "xinf-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xinf"
+path = "src/main.rs"
+
+[dependencies]
+xinf-common = { workspace = true }
+xinf-device = { workspace = true }
+xinf-meta = { workspace = true }
+xinf-scheduler = { workspace = true }
+xinf-router = { workspace = true }
+xinf-agent = { workspace = true }
+xinf-gateway = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde_json = { workspace = true }
+hostname = "0.3"

@@ -1,0 +1,18 @@
+[package]
+name = "xinf-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xinf-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+libloading = { workspace = true }
+once_cell = { workspace = true }
+hostname = "0.3"
+chrono = { workspace = true }
+tokio = { workspace = true }
