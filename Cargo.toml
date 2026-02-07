@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "crates/xinf-common",
-    "crates/xinf-device",
-    "crates/xinf-meta",
-    "crates/xinf-scheduler",
-    "crates/xinf-router",
-    "crates/xinf-agent",
-    "crates/xinf-gateway",
-    "crates/xinf-cli",
+    "crates/deepinfer-common",
+    "crates/deepinfer-device",
+    "crates/deepinfer-meta",
+    "crates/deepinfer-scheduler",
+    "crates/deepinfer-router",
+    "crates/deepinfer-agent",
+    "crates/deepinfer-gateway",
+    "crates/deepinfer-cli",
 ]
 resolver = "2"
 
@@ -15,7 +15,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-authors = ["xinf contributors"]
+authors = ["deepinfer contributors"]
 
 [workspace.dependencies]
 # Async runtime
@@ -46,7 +46,6 @@ thiserror = "1.0"
 
 # Data structures
 dashmap = "5.5"
-sled = "0.34"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
@@ -69,10 +68,10 @@ async-trait = "0.1"
 reqwest = { version = "0.11", features = ["json"] }
 
 # Local workspace crates
-xinf-common = { path = "crates/xinf-common" }
-xinf-device = { path = "crates/xinf-device" }
-xinf-meta = { path = "crates/xinf-meta" }
-xinf-scheduler = { path = "crates/xinf-scheduler" }
-xinf-router = { path = "crates/xinf-router" }
-xinf-agent = { path = "crates/xinf-agent" }
-xinf-gateway = { path = "crates/xinf-gateway" }
+deepinfer-common = { path = "crates/deepinfer-common" }
+deepinfer-device = { path = "crates/deepinfer-device" }
+deepinfer-meta = { path = "crates/deepinfer-meta" }
+deepinfer-scheduler = { path = "crates/deepinfer-scheduler" }
+deepinfer-router = { path = "crates/deepinfer-router" }
+deepinfer-agent = { path = "crates/deepinfer-agent" }
+deepinfer-gateway = { path = "crates/deepinfer-gateway" }

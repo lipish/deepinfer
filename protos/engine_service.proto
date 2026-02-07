@@ -23,7 +23,7 @@ service EngineService {
   rpc CreateEmbedding(EmbeddingRequest) returns (EmbeddingResponse);
   
   // Cancel a request
-  rpc CancelRequest(CancelRequest) returns (CancelResponse);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
   
   // Get metrics
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);

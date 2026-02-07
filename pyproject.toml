@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "xinf"
+name = "deepinfer"
 version = "0.1.0"
-description = "xinf - Rust-Native Inference Platform (Python components)"
+description = "deepinfer - Rust-Native Inference Platform (Python components)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "xinf contributors"},
+    {name = "deepinfer contributors"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -47,7 +47,7 @@ dev = [
 ]
 
 all = [
-    "xinf[engine,registry,chat,dev]",
+    "deepinfer[engine,registry,chat,dev]",
 ]
 
 [tool.setuptools.packages.find]

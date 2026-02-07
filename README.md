@@ -1,10 +1,10 @@
-# xinf - Rust-Native Inference Platform
+# deepinfer - Rust-Native Inference Platform
 
 A high-performance, declarative inference platform with Rust control plane and Python data plane.
 
 ## Architecture
 
-**xinf** adopts a hybrid architecture:
+**deepinfer** adopts a hybrid architecture:
 
 - **Rust Control Plane**: Gateway (Axum HTTP), Scheduler, Router, Worker Agent, MetaStore, Device Abstraction, CLI
 - **Python Data Plane**: Engine Shim (gRPC wrapper for vLLM), Model Registry, Chat Business Logic
@@ -53,13 +53,13 @@ FP32, FP16, BF16, INT8, INT4, FP8 (E4M3/E5M2), FP4
 
 ```bash
 # Start the gateway and scheduler
-xinf serve
+deepinfer serve
 
 # Start a worker agent on this node
-xinf worker
+deepinfer worker
 
 # Launch a model
-xinf launch --model Qwen/Qwen2.5-7B-Instruct --engine vllm --device cuda:0
+deepinfer launch --model Qwen/Qwen2.5-7B-Instruct --engine vllm --device cuda:0
 
 # Test inference
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -74,21 +74,21 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ```
 .
-├── crates/              # Rust control plane
-│   ├── xinf-common/     # Shared types and utilities
-│   ├── xinf-device/     # Hardware abstraction layer
-│   ├── xinf-meta/       # Metadata storage
-│   ├── xinf-scheduler/  # Placement scheduler
-│   ├── xinf-router/     # Request routing
-│   ├── xinf-agent/      # Worker agent
-│   ├── xinf-gateway/    # API gateway
-│   └── xinf-cli/        # Command-line interface
-├── python/              # Python data plane
-│   ├── xinf_engine/     # Engine Shim (vLLM wrapper)
-│   ├── xinf_registry/   # Model registry
-│   └── xinf_chat/       # Chat template logic
-├── protos/              # gRPC protocol definitions
-└── configs/             # Configuration files
+├── crates/                    # Rust control plane
+│   ├── deepinfer-common/      # Shared types and utilities
+│   ├── deepinfer-device/      # Hardware abstraction layer
+│   ├── deepinfer-meta/        # Metadata storage
+│   ├── deepinfer-scheduler/   # Placement scheduler
+│   ├── deepinfer-router/      # Request routing
+│   ├── deepinfer-agent/       # Worker agent
+│   ├── deepinfer-gateway/     # API gateway
+│   └── deepinfer-cli/         # Command-line interface
+├── python/                    # Python data plane
+│   ├── deepinfer_engine/      # Engine Shim (vLLM wrapper)
+│   ├── deepinfer_registry/    # Model registry
+│   └── deepinfer_chat/        # Chat template logic
+├── protos/                    # gRPC protocol definitions
+└── configs/                   # Configuration files
 ```
 
 ## Development
@@ -101,12 +101,12 @@ cargo build --release
 ### Install Python Dependencies
 ```bash
 cd python
-pip install -e xinf_engine -e xinf_registry -e xinf_chat
+pip install -e deepinfer_engine -e deepinfer_registry -e deepinfer_chat
 ```
 
 ### Generate gRPC Code
 ```bash
-python -m grpc_tools.protoc -I protos --python_out=python/xinf_engine/generated --grpc_python_out=python/xinf_engine/generated protos/engine_service.proto
+python -m grpc_tools.protoc -I protos --python_out=python/deepinfer_engine/generated --grpc_python_out=python/deepinfer_engine/generated protos/engine_service.proto
 ```
 
 ## Configuration

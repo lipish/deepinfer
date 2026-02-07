@@ -1,0 +1,17 @@
+[package]
+name = "deepinfer-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+deepinfer-common = { workspace = true }
+deepinfer-meta = { workspace = true }
+deepinfer-device = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

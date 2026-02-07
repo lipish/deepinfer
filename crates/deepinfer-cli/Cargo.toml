@@ -1,0 +1,28 @@
+[package]
+name = "deepinfer-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "deepinfer"
+path = "src/main.rs"
+
+[dependencies]
+deepinfer-common = { workspace = true }
+deepinfer-device = { workspace = true }
+deepinfer-meta = { workspace = true }
+deepinfer-scheduler = { workspace = true }
+deepinfer-router = { workspace = true }
+deepinfer-agent = { workspace = true }
+deepinfer-gateway = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+hostname = "0.3"
