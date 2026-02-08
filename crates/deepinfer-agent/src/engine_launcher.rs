@@ -40,8 +40,8 @@ impl EngineLauncher {
         info!("Launching Docker engine {} for model: {} using image: {}", 
               engine.engine_id, engine.config.model_name, docker_image);
         
-        // Allocate port
-        let port = 8000 + engine.device_indices.first().unwrap_or(&0);
+        // Allocate port based on engine_id to avoid conflicts
+        let port = 8000 + (engine.engine_id.as_u128() % 1000) as u32;
         
         // Build device string for --gpus
         let device_str = if !engine.device_indices.is_empty() {
@@ -57,49 +57,53 @@ impl EngineLauncher {
         let container_name = engine.config.container_name.clone()
             .unwrap_or_else(|| format!("deepinfer-engine-{}", &engine.engine_id.to_string()[..8]));
         
+        // Check if container already exists and remove it
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &container_name])
+            .output();
+        
         // Determine model path (for volume mount)
         let model_path = engine.config.model_path.clone()
             .unwrap_or_else(|| engine.config.model_name.clone());
         
-        // Build docker command
-        let mut cmd = Command::new("docker");
-        cmd.arg("run")
-            .arg("-d")  // detached
-            .arg("--name").arg(&container_name)
-            .arg("--gpus").arg(format!("\"device={}\"", device_str))
-            .arg("-v").arg(format!("{}:/model", model_path))
-            .arg("-p").arg(format!("{}:8000", port))
-            .arg(docker_image)
-            .arg("--model").arg("/model")
-            .arg("--tensor-parallel-size").arg(engine.config.tensor_parallel_size.to_string())
-            .arg("--gpu-memory-utilization").arg(engine.config.gpu_memory_utilization.to_string());
+        // Build docker command using shell to handle complex arguments
+        let docker_cmd = format!(
+            "docker run -d --name {} --gpus '\"device={}\"' -v {}:/model -p {}:8000 {} --model /model --tensor-parallel-size {} --gpu-memory-utilization {}{}{}",
+            container_name,
+            device_str,
+            model_path,
+            port,
+            docker_image,
+            engine.config.tensor_parallel_size,
+            engine.config.gpu_memory_utilization,
+            engine.config.max_model_len.map(|m| format!(" --max-model-len {}", m)).unwrap_or_default(),
+            engine.config.dtype.as_ref().map(|d| format!(" --dtype {}", d)).unwrap_or_default(),
+        );
         
-        // Optional args
-        if let Some(max_len) = engine.config.max_model_len {
-            cmd.arg("--max-model-len").arg(max_len.to_string());
-        }
+        info!("Docker command: {}", docker_cmd);
         
-        if let Some(dtype) = &engine.config.dtype {
-            cmd.arg("--dtype").arg(dtype);
-        }
-        
-        info!("Docker command: {:?}", cmd);
-        
-        let output = cmd.output()
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&docker_cmd)
+            .output()
             .map_err(|e| anyhow!("Failed to run docker: {}", e))?;
         
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("Docker run failed: {}", stderr));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!("Docker run failed: {} {}", stderr, stdout));
         }
         
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if container_id.len() < 12 {
+            return Err(anyhow!("Invalid container ID: {}", container_id));
+        }
         info!("Docker container started: {} ({})", container_name, &container_id[..12]);
         
         self.handles.lock().unwrap().insert(engine.engine_id, EngineHandle::Container(container_id.clone()));
         
         // Wait for container to be ready (vLLM may take a while to initialize)
-        self.wait_for_docker_ready(port as u16, 180).await?;
+        self.wait_for_docker_ready(port as u16, 300).await?;
         
         Ok(EndpointInfo {
             address: "localhost".to_string(),
