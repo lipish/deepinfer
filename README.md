@@ -1,25 +1,23 @@
 # deepinfer - Rust-Native Inference Platform
 
-A high-performance, declarative inference platform with Rust control plane and Python data plane.
+A high-performance, declarative inference platform with pure Rust control plane.
 
 ## Architecture
 
-**deepinfer** adopts a hybrid architecture:
+**deepinfer** is a Rust-native inference orchestration platform:
 
 - **Rust Control Plane**: Gateway (Axum HTTP), Scheduler, Router, Worker Agent, MetaStore, Device Abstraction, CLI
-- **Python Data Plane**: Engine Shim (gRPC wrapper for vLLM), Model Registry, Chat Business Logic
+- **Docker Data Plane**: vLLM runs in Docker containers with OpenAI-compatible API
 
 ### Core Design Principles
 
 - **Declarative Reconcile**: Scheduler writes intent to MetaStore, Agents autonomously execute via Watch
-- **Non-Invasive Engines**: vLLM runs as independent process, communicates via gRPC or HTTP
+- **Non-Invasive Engines**: vLLM runs in Docker containers, communicates via HTTP
 - **Unified Hardware Abstraction**: Rust FFI calls NVML for device discovery and monitoring
-- **Flexible Backend**: Support both native Python process and Docker container deployment
 
 ## Features
 
-- ✅ vLLM engine support via gRPC Engine Shim (native mode)
-- ✅ vLLM Docker support with OpenAI-compatible API (docker mode)
+- ✅ vLLM Docker support with OpenAI-compatible API
 - ✅ NVIDIA GPU support (including RTX 5090 / Blackwell SM 12.0)
 - ✅ Multi-GPU tensor parallelism
 - ✅ Declarative scheduling with reconciliation loops
@@ -49,10 +47,9 @@ FP32, FP16, BF16, INT8, INT4, FP8 (E4M3/E5M2), FP4
 
 ### Prerequisites
 - Rust toolchain (1.70+)
-- Python 3.9+
 - CUDA 12.0+ (for NVIDIA GPUs)
-- etcd 3.5+ (for distributed mode)
-- Docker (optional, for docker backend)
+- etcd 3.5+
+- Docker
 
 ### Start Services
 
@@ -67,21 +64,7 @@ deepinfer serve -c configs/default.toml
 deepinfer worker -n node-1
 ```
 
-### Deploy Model (Native Mode)
-
-```bash
-# Launch a model using native Python backend
-curl -X POST http://localhost:8082/v1/deployments \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-7B-Instruct",
-    "engine": "vllm",
-    "device": "cuda:0",
-    "gpu_memory_utilization": 0.9
-  }'
-```
-
-### Deploy Model (Docker Mode)
+### Deploy Model
 
 ```bash
 # Launch a model using Docker vLLM backend
@@ -111,19 +94,6 @@ curl -X POST http://localhost:8082/v1/chat/completions \
   }'
 ```
 
-## Engine Backends
-
-### Native Mode (default)
-- Runs vLLM as Python subprocess
-- Uses gRPC for communication
-- Requires local vLLM installation
-
-### Docker Mode
-- Runs vLLM in Docker container
-- Uses HTTP (OpenAI-compatible API)
-- Recommended for RTX 5090/Blackwell GPUs (requires vLLM v0.11.0+)
-- Supports tensor parallelism across multiple GPUs
-
 ## Project Structure
 
 ```
@@ -137,11 +107,6 @@ curl -X POST http://localhost:8082/v1/chat/completions \
 │   ├── deepinfer-agent/       # Worker agent & engine launcher
 │   ├── deepinfer-gateway/     # API gateway
 │   └── deepinfer-cli/         # Command-line interface
-├── python/                    # Python data plane
-│   ├── deepinfer_engine/      # Engine Shim (vLLM wrapper)
-│   ├── deepinfer_registry/    # Model registry
-│   └── deepinfer_chat/        # Chat template logic
-├── protos/                    # gRPC protocol definitions
 └── configs/                   # Configuration files
 ```
 
@@ -154,11 +119,10 @@ Deploy a new model engine.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | model | string | Model name (required) |
-| engine | string | Engine type, default "vllm" |
-| backend | string | "native" or "docker" |
-| docker_image | string | Docker image for docker backend |
+| backend | string | "docker" (required) |
+| docker_image | string | Docker image (e.g. "vllm/vllm-openai:v0.11.0") |
 | model_path | string | Path to model files |
-| device | string | Device spec, e.g. "0,1" or "cuda:0" |
+| device | string | Device spec, e.g. "0,1" |
 | tensor_parallel_size | int | Number of GPUs for tensor parallelism |
 | gpu_memory_utilization | float | GPU memory fraction (0.0-1.0) |
 
@@ -168,30 +132,14 @@ OpenAI-compatible chat completion endpoint.
 
 ## Development
 
-### Build Rust Components
+### Build
 ```bash
 cargo build --release
-```
-
-### Install Python Dependencies
-```bash
-cd python
-pip install -e deepinfer_engine -e deepinfer_registry -e deepinfer_chat
-```
-
-### Generate gRPC Code
-```bash
-python -m grpc_tools.protoc -I protos \
-  --python_out=python/deepinfer_engine/generated \
-  --grpc_python_out=python/deepinfer_engine/generated \
-  protos/engine_service.proto
 ```
 
 ## Configuration
 
 Main configuration file: `configs/default.toml`
-
-Engine compatibility matrix: `configs/engine_compatibility.toml`
 
 ## License
 
