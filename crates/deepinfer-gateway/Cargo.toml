@@ -18,3 +18,5 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }

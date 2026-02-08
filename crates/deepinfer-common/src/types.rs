@@ -64,6 +64,15 @@ pub struct EndpointInfo {
     pub protocol: String, // "grpc" or "http"
 }
 
+/// Engine backend type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineBackend {
+    #[default]
+    Native,
+    Docker,
+}
+
 /// Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
@@ -80,6 +89,13 @@ pub struct EngineConfig {
     pub gpu_memory_utilization: f32,
     pub enforce_eager: bool,
     pub additional_args: HashMap<String, String>,
+    /// Engine backend: native (Python subprocess) or docker
+    #[serde(default)]
+    pub backend: EngineBackend,
+    /// Docker image for docker backend (e.g. "vllm/vllm-openai:v0.11.0")
+    pub docker_image: Option<String>,
+    /// Container name prefix for docker backend
+    pub container_name: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -98,6 +114,9 @@ impl Default for EngineConfig {
             gpu_memory_utilization: 0.9,
             enforce_eager: false,
             additional_args: HashMap::new(),
+            backend: EngineBackend::Native,
+            docker_image: None,
+            container_name: None,
         }
     }
 }
@@ -124,6 +143,8 @@ pub struct RunningEngine {
     pub node_id: String,
     pub device_indices: Vec<u32>,
     pub pid: Option<u32>,
+    /// Docker container ID (for docker backend)
+    pub container_id: Option<String>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub error_message: Option<String>,
 }

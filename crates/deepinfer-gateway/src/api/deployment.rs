@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use deepinfer_common::types::{EngineConfig, RunningEngine, EngineStatus};
+use deepinfer_common::types::{EngineConfig, RunningEngine, EngineStatus, EngineBackend};
 use deepinfer_meta::MetaStore;
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,13 @@ pub struct LaunchRequest {
     pub tensor_parallel_size: Option<u32>,
     #[serde(default)]
     pub gpu_memory_utilization: Option<f32>,
+    /// Backend type: "native" or "docker"
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Docker image (required if backend is "docker")
+    pub docker_image: Option<String>,
+    /// Model path (for volume mount in docker mode)
+    pub model_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,11 +47,17 @@ pub async fn launch_model(
         vec![0] // Default to device 0
     };
     
+    // Determine backend type
+    let backend = match req.backend.as_deref() {
+        Some("docker") => EngineBackend::Docker,
+        _ => EngineBackend::Native,
+    };
+    
     // Build engine config
     let config = EngineConfig {
         engine_type: req.engine.unwrap_or_else(|| "vllm".to_string()),
         model_name: req.model.clone(),
-        model_path: None,
+        model_path: req.model_path.clone(),
         tensor_parallel_size: req.tensor_parallel_size.unwrap_or(1),
         pipeline_parallel_size: 1,
         max_num_seqs: 256,
@@ -55,6 +68,9 @@ pub async fn launch_model(
         gpu_memory_utilization: req.gpu_memory_utilization.unwrap_or(0.9),
         enforce_eager: false,
         additional_args: std::collections::HashMap::new(),
+        backend,
+        docker_image: req.docker_image.clone(),
+        container_name: None,
     };
     
     // Create a running engine entry in MetaStore
@@ -67,6 +83,7 @@ pub async fn launch_model(
         node_id: "".to_string(), // Will be assigned by scheduler
         device_indices: device_indices.clone(),
         pid: None,
+        container_id: None,
         started_at: None,
         error_message: None,
     };
