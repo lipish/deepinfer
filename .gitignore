@@ -79,3 +79,8 @@ __pycache__/
 # Model cache
 .cache/
 
+
+# Build artifacts
+include
+lib64
+vllm-src/
