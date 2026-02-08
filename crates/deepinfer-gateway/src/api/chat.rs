@@ -5,13 +5,15 @@ use axum::{
     Json,
 };
 use axum::response::sse::{Event, KeepAlive};
-use futures::stream::{Stream, StreamExt};
+use futures::stream::StreamExt;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::convert::Infallible;
+use std::time::Instant;
 use deepinfer_router::KvAwareRouter;
 use deepinfer_common::types::{RunningEngine, EngineStatus};
 use tracing::{info, error};
+use crate::metrics::{INFERENCE_REQUESTS_TOTAL, INFERENCE_LATENCY_SECONDS, INFERENCE_TOKENS_TOTAL};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatCompletionRequest {
@@ -72,11 +74,23 @@ pub async fn chat_completions(
     State((store, _router)): State<(Arc<dyn deepinfer_meta::MetaStore>, Arc<KvAwareRouter>)>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
+    let start_time = Instant::now();
+    let model = req.model.clone();
+    let stream_mode = req.stream;
+    
+    // Record initial request metrics
+    INFERENCE_REQUESTS_TOTAL.with_label_values(&[&model, &stream_mode.to_string()]).inc();
+    
     // 1. Find running engine for the requested model
     let engine = match find_running_engine(&store, &req.model).await {
         Ok(e) => e,
         Err(e) => {
             error!("Failed to find engine for model {}: {}", req.model, e);
+            
+            // Record metrics for failed request
+            let duration = start_time.elapsed().as_secs_f64();
+            INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+            
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
@@ -92,6 +106,10 @@ pub async fn chat_completions(
     let endpoint = match &engine.endpoint {
         Some(ep) => ep,
         None => {
+            // Record metrics for unavailable endpoint
+            let duration = start_time.elapsed().as_secs_f64();
+            INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+            
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
@@ -118,6 +136,10 @@ pub async fn chat_completions(
         }
         "grpc" => forward_grpc_request(endpoint, req).await,
         _ => {
+            // Record metrics for unknown protocol error
+            let duration = start_time.elapsed().as_secs_f64();
+            INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+            
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -165,6 +187,9 @@ async fn forward_http_request(
     endpoint: &deepinfer_common::types::EndpointInfo,
     req: ChatCompletionRequest,
 ) -> Response {
+    let start_time = Instant::now();
+    let model = req.model.clone();
+    
     let client = reqwest::Client::new();
     let url = format!("http://{}:{}/v1/chat/completions", endpoint.address, endpoint.port);
     
@@ -184,11 +209,31 @@ async fn forward_http_request(
                 match resp.json::<ChatCompletionResponse>().await {
                     Ok(mut chat_resp) => {
                         // Restore the original model name in the response
-                        chat_resp.model = req.model;
+                        chat_resp.model = req.model.clone();
+                        
+                        // Record token metrics if available in response
+                        if let Some(usage) = &chat_resp.usage {
+                            INFERENCE_TOKENS_TOTAL
+                                .with_label_values(&[&model, "prompt"])
+                                .inc_by(usage.prompt_tokens as u64);
+                            INFERENCE_TOKENS_TOTAL
+                                .with_label_values(&[&model, "completion"])
+                                .inc_by(usage.completion_tokens as u64);
+                        }
+                        
+                        // Record latency
+                        let duration = start_time.elapsed().as_secs_f64();
+                        INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+                        
                         (StatusCode::OK, Json(chat_resp)).into_response()
                     }
                     Err(e) => {
                         error!("Failed to parse response: {}", e);
+                        
+                        // Record latency for error case
+                        let duration = start_time.elapsed().as_secs_f64();
+                        INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+                        
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(serde_json::json!({
@@ -204,6 +249,11 @@ async fn forward_http_request(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 error!("Backend returned error: {} - {}", status, body);
+                
+                // Record latency for error case
+                let duration = start_time.elapsed().as_secs_f64();
+                INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+                
                 (
                     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                     body
@@ -212,6 +262,11 @@ async fn forward_http_request(
         }
         Err(e) => {
             error!("Failed to forward request: {}", e);
+            
+            // Record latency for error case
+            let duration = start_time.elapsed().as_secs_f64();
+            INFERENCE_LATENCY_SECONDS.with_label_values(&[&model]).observe(duration);
+            
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -230,6 +285,9 @@ async fn forward_http_stream(
     endpoint: &deepinfer_common::types::EndpointInfo,
     req: ChatCompletionRequest,
 ) -> Response {
+    let start_time = Instant::now();
+    let original_model = req.model.clone();
+    
     let client = reqwest::Client::new();
     let url = format!("http://{}:{}/v1/chat/completions", endpoint.address, endpoint.port);
     
@@ -240,8 +298,6 @@ async fn forward_http_stream(
     forward_req.model = "/model".to_string();
     forward_req.stream = true;
     
-    let original_model = req.model.clone();
-    
     match client.post(&url)
         .json(&forward_req)
         .send()
@@ -249,39 +305,88 @@ async fn forward_http_stream(
     {
         Ok(resp) => {
             if resp.status().is_success() {
-                let byte_stream = resp.bytes_stream();
+                let stream = resp.bytes_stream();
                 
-                let stream = byte_stream.map(move |chunk_result| {
-                    match chunk_result {
-                        Ok(bytes) => {
-                            let text = String::from_utf8_lossy(&bytes);
-                            // Process SSE data lines
-                            let mut events = Vec::new();
-                            for line in text.lines() {
-                                if line.starts_with("data: ") {
-                                    let data = &line[6..];
-                                    if data == "[DONE]" {
-                                        events.push(Event::default().data("[DONE]"));
-                                    } else {
-                                        // Replace /model with original model name in response
-                                        let modified = data.replace("\"/model\"", &format!("\"{}\"", original_model));
-                                        events.push(Event::default().data(modified));
+                // Clone values for the stream closures
+                let original_model_err = original_model.clone();
+                let start_time_err = start_time;
+                
+                let stream = stream
+                    .map_err(move |e| {
+                        error!("Stream error: {}", e);
+                        
+                        // Record latency for stream error
+                        let duration = start_time_err.elapsed().as_secs_f64();
+                        crate::metrics::INFERENCE_LATENCY_SECONDS
+                            .with_label_values(&[&original_model_err])
+                            .observe(duration);
+                        
+                        std::io::Error::new(std::io::ErrorKind::Other, e)
+                    })
+                    .map(move |result_bytes| {
+                        let original_model_map = original_model.clone();
+                        let start_time_map = start_time;
+                        
+                        match result_bytes {
+                            Ok(bytes) => {
+                                let text = String::from_utf8_lossy(&bytes);
+                                // Process SSE data lines
+                                let mut events = Vec::new();
+                                for line in text.lines() {
+                                    if line.starts_with("data: ") {
+                                        let data = &line[6..];
+                                        if data == "[DONE]" {
+                                            // Record latency for successful streaming request
+                                            let duration = start_time_map.elapsed().as_secs_f64();
+                                            crate::metrics::INFERENCE_LATENCY_SECONDS
+                                                .with_label_values(&[&original_model_map])
+                                                .observe(duration);
+                                            
+                                            events.push(Event::default().data("[DONE]"));
+                                        } else {
+                                            // Parse and record token usage if available in stream
+                                            if let Ok(json_data) = serde_json::from_str::<serde_json::Value>(data) {
+                                                if let Some(usage) = json_data.get("usage") {
+                                                    if let (Some(prompt_tokens), Some(completion_tokens)) = (
+                                                        usage.get("prompt_tokens").and_then(|v| v.as_i64()),
+                                                        usage.get("completion_tokens").and_then(|v| v.as_i64())
+                                                    ) {
+                                                        crate::metrics::INFERENCE_TOKENS_TOTAL
+                                                            .with_label_values(&[&original_model_map, "prompt"])
+                                                            .inc_by(prompt_tokens as u64);
+                                                        crate::metrics::INFERENCE_TOKENS_TOTAL
+                                                            .with_label_values(&[&original_model_map, "completion"])
+                                                            .inc_by(completion_tokens as u64);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Replace /model with original model name in response
+                                            let modified = data.replace("\"/model\"", &format!("\"{}\"", original_model_map));
+                                            events.push(Event::default().data(modified));
+                                        }
                                     }
                                 }
+                                if events.is_empty() {
+                                    Ok(Event::default().comment("heartbeat"))
+                                } else {
+                                    // Return first event, the rest will be in subsequent chunks
+                                    Ok(events.into_iter().next().unwrap_or_else(|| Event::default().comment("empty")))
+                                }
                             }
-                            if events.is_empty() {
-                                Ok::<_, Infallible>(Event::default().comment("heartbeat"))
-                            } else {
-                                // Return first event, the rest will be in subsequent chunks
-                                Ok(events.into_iter().next().unwrap_or_else(|| Event::default().comment("empty")))
+                            Err(e) => {
+                                error!("Stream error: {}", e);
+                                
+                                // Record latency for stream error
+                                let duration = start_time_map.elapsed().as_secs_f64();
+                                crate::metrics::INFERENCE_LATENCY_SECONDS
+                                    .with_label_values(&[&original_model_map])
+                                    .observe(duration);
+                                
+                                Err(std::io::Error::new(std::io::ErrorKind::Other, e))
                             }
                         }
-                        Err(e) => {
-                            error!("Stream error: {}", e);
-                            Ok(Event::default().data(format!("{{\"error\": \"{}\"}}", e)))
-                        }
-                    }
-                });
+                    });
                 
                 Sse::new(stream)
                     .keep_alive(KeepAlive::default())
@@ -290,6 +395,13 @@ async fn forward_http_stream(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 error!("Backend returned error: {} - {}", status, body);
+                
+                // Record latency for error case
+                let duration = start_time.elapsed().as_secs_f64();
+                crate::metrics::INFERENCE_LATENCY_SECONDS
+                    .with_label_values(&[&original_model])
+                    .observe(duration);
+                
                 (
                     StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                     body
@@ -298,6 +410,13 @@ async fn forward_http_stream(
         }
         Err(e) => {
             error!("Failed to forward streaming request: {}", e);
+            
+            // Record latency for error case
+            let duration = start_time.elapsed().as_secs_f64();
+            crate::metrics::INFERENCE_LATENCY_SECONDS
+                .with_label_values(&[&original_model])
+                .observe(duration);
+            
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({

@@ -93,21 +93,63 @@ async fn serve(config_path: String) -> Result<()> {
     
     // Build Axum app
     use axum::{
+        extract::{MatchedPath, Request},
+        middleware::Next,
+        response::Response,
         routing::{get, post},
         Router,
     };
     use tower_http::trace::TraceLayer;
+    use deepinfer_gateway::metrics::{HTTP_REQUESTS_TOTAL, HTTP_REQUEST_DURATION_SECONDS};
     
     // Create a shared state tuple
     type AppState = (Arc<dyn deepinfer_meta::MetaStore>, Arc<deepinfer_router::KvAwareRouter>);
     let state: AppState = (store.clone() as Arc<dyn deepinfer_meta::MetaStore>, router);
+    
+    // Register metrics
+    deepinfer_gateway::register_metrics();
+    
+    // Spawn a background task to periodically update engine metrics
+    let metrics_store = store.clone();
+    tokio::spawn(async move {
+        loop {
+            deepinfer_gateway::metrics::update_engine_metrics(metrics_store.clone()).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await; // Update every 30 seconds
+        }
+    });
+    
+    // Custom middleware to track HTTP requests
+    async fn track_metrics(request: Request<axum::body::Body>, next: Next) -> Response {
+        let start = std::time::Instant::now();
+        let path = if let Some(matched_path) = request.extensions().get::<MatchedPath>() {
+            matched_path.as_str()
+        } else {
+            request.uri().path()
+        }.to_owned();
+        let method = request.method().clone();
+
+        let response = next.run(request).await;
+        let duration = start.elapsed().as_secs_f64();
+        
+        let status = response.status().as_u16().to_string();
+        HTTP_REQUESTS_TOTAL
+            .with_label_values(&[method.as_str(), &path, &status])
+            .inc();
+        HTTP_REQUEST_DURATION_SECONDS
+            .with_label_values(&[method.as_str(), &path])
+            .observe(duration);
+
+        response
+    }
     
     let app = Router::new()
         .route("/health", get(deepinfer_gateway::health_check))
         .route("/v1/models", get(deepinfer_gateway::list_models))
         .route("/v1/deployments", post(deepinfer_gateway::launch_model))
         .route("/v1/chat/completions", post(deepinfer_gateway::chat_completions))
+        .route("/metrics", get(deepinfer_gateway::metrics_endpoint))
         .with_state(state)
+        .layer(axum::middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http());
     
     let addr = format!("{}:{}", config.server.host, config.server.port);
