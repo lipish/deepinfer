@@ -83,15 +83,15 @@ impl Reconciler {
         store: &Arc<dyn MetaStore>,
         launcher: &Arc<EngineLauncher>,
     ) -> anyhow::Result<()> {
-        use deepinfer_common::types::{RunningEngine, EngineStatus};
+        use deepinfer_common::types::{RunningEngine, EngineStatus, RestartPolicy};
         
-        // List all pending engines from MetaStore
+        // List all engines from MetaStore
         let engines = store.list("/engines").await?;
         
         for (key, value) in engines {
             let engine: RunningEngine = serde_json::from_slice(&value)?;
             
-            // Only process pending engines with no assigned node
+            // Process pending engines with no assigned node
             if engine.status == EngineStatus::Pending && engine.node_id.is_empty() {
                 tracing::info!("Found pending engine: {} for model {}", engine.engine_id, engine.config.model_name);
                 
@@ -120,6 +120,7 @@ impl Reconciler {
                             final_engine.status = EngineStatus::Running;
                             final_engine.endpoint = Some(endpoint);
                             final_engine.started_at = Some(chrono::Utc::now());
+                            final_engine.error_message = None;
                             
                             let final_value = serde_json::to_vec(&final_engine).unwrap();
                             let _ = store.put(&key, final_value).await;
@@ -137,6 +138,44 @@ impl Reconciler {
                         }
                     }
                 });
+            }
+            
+            // Handle failed engines - attempt restart based on policy
+            if engine.status == EngineStatus::Failed && engine.node_id == node_id {
+                let should_restart = match engine.config.restart_policy {
+                    RestartPolicy::Always => true,
+                    RestartPolicy::OnFailure => true,
+                    RestartPolicy::Never => false,
+                };
+                
+                let max_restarts = engine.config.max_restarts;
+                let within_limit = max_restarts == 0 || engine.restart_count < max_restarts;
+                
+                if should_restart && within_limit {
+                    tracing::info!(
+                        "Restarting failed engine {} (attempt {}/{})", 
+                        engine.engine_id, 
+                        engine.restart_count + 1,
+                        if max_restarts == 0 { "unlimited".to_string() } else { max_restarts.to_string() }
+                    );
+                    
+                    // Reset engine status to pending for restart
+                    let mut restart_engine = engine.clone();
+                    restart_engine.status = EngineStatus::Pending;
+                    restart_engine.node_id = String::new(); // Clear node assignment
+                    restart_engine.endpoint = None;
+                    restart_engine.error_message = None;
+                    restart_engine.restart_count += 1;
+                    
+                    let restart_value = serde_json::to_vec(&restart_engine)?;
+                    store.put(&key, restart_value).await?;
+                } else if !within_limit {
+                    tracing::warn!(
+                        "Engine {} exceeded max restart attempts ({}), not restarting",
+                        engine.engine_id,
+                        max_restarts
+                    );
+                }
             }
         }
         

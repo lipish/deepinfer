@@ -73,6 +73,16 @@ pub enum EngineBackend {
     Docker,
 }
 
+/// Restart policy for engines
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartPolicy {
+    #[default]
+    Always,
+    OnFailure,
+    Never,
+}
+
 /// Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
@@ -96,6 +106,16 @@ pub struct EngineConfig {
     pub docker_image: Option<String>,
     /// Container name prefix for docker backend
     pub container_name: Option<String>,
+    /// Restart policy
+    #[serde(default)]
+    pub restart_policy: RestartPolicy,
+    /// Maximum restart attempts (0 = unlimited)
+    #[serde(default = "default_max_restarts")]
+    pub max_restarts: u32,
+}
+
+fn default_max_restarts() -> u32 {
+    3
 }
 
 impl Default for EngineConfig {
@@ -117,6 +137,8 @@ impl Default for EngineConfig {
             backend: EngineBackend::Native,
             docker_image: None,
             container_name: None,
+            restart_policy: RestartPolicy::Always,
+            max_restarts: 3,
         }
     }
 }
@@ -147,4 +169,7 @@ pub struct RunningEngine {
     pub container_id: Option<String>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub error_message: Option<String>,
+    /// Number of restart attempts
+    #[serde(default)]
+    pub restart_count: u32,
 }
